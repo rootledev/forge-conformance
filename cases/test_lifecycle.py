@@ -36,7 +36,7 @@ def test_FC050_kill_mid_session_respawn_is_cheap_and_idempotent(forge):
         proc = _spawn(forge)
         t0 = time.monotonic()
         reply = proc.initialize(cache_bytes=CACHE_BYTES,
-                                cache_dir=str(forge.root / "cache"),
+                                cache_dir=str(forge.cache_dir),
                                 timeout=INIT_TIMEOUT)
         elapsed = time.monotonic() - t0
         fc_assert(reply.get("protocol") == 1, *c,
@@ -58,7 +58,7 @@ def test_FC051_initialize_reruns_every_generation_with_same_cache_params(forge):
     and respawns alike (§Handshake cache budget). With the fixture's
     API token unset, each generation must still handshake."""
     c = C("FC-051")
-    cache_dir = str(forge.root / "cache")
+    cache_dir = str(forge.cache_dir)
     gen0 = _spawn(forge)
     r0 = gen0.initialize(cache_bytes=CACHE_BYTES, cache_dir=cache_dir,
                          timeout=INIT_TIMEOUT)
@@ -82,7 +82,7 @@ def test_FC052_no_network_io_during_initialize(forge):
     hermetic = _spawn(forge, hermetic=True)
     t0 = time.monotonic()
     reply = hermetic.initialize(cache_bytes=CACHE_BYTES,
-                                cache_dir=str(forge.root / "cache"),
+                                cache_dir=str(forge.cache_dir),
                                 timeout=INIT_TIMEOUT)
     fc_assert(reply.get("protocol") == 1, *c,
               f"initialize under a hermetic env (no credential vars, no "
@@ -98,7 +98,7 @@ def test_FC052_no_network_io_during_initialize(forge):
     # ...and set later: a bogus token must not break spawn either (lazy).
     tok = _spawn(forge, hermetic=True, extra_env={"FORGE_TOKEN": "forge-invalid"})
     reply = tok.initialize(cache_bytes=CACHE_BYTES,
-                           cache_dir=str(forge.root / "cache"),
+                           cache_dir=str(forge.cache_dir),
                            timeout=INIT_TIMEOUT)
     fc_assert(reply.get("protocol") == 1, *c,
               f"a token present-but-unvalidated at spawn must not break "
@@ -112,7 +112,7 @@ def test_FC053_unknown_fields_in_requests_are_ignored(forge):
     exactly this reason)."""
     c = C("FC-053")
     proc = _spawn(forge)
-    proc.initialize(cache_bytes=CACHE_BYTES, cache_dir=str(forge.root / "cache"),
+    proc.initialize(cache_bytes=CACHE_BYTES, cache_dir=str(forge.cache_dir),
                     timeout=INIT_TIMEOUT, future_field={"a": [1]})
     tree = proc.request("repo/tree", {"repo": forge.repo_id("alpha"),
                                       "zorglub": 42, "partial": False})
@@ -132,7 +132,7 @@ def test_FC054_unsolicited_notifications_are_ignored(forge):
     never replied to, and must not wedge the child."""
     c = C("FC-054")
     proc = _spawn(forge)
-    proc.initialize(cache_bytes=CACHE_BYTES, cache_dir=str(forge.root / "cache"),
+    proc.initialize(cache_bytes=CACHE_BYTES, cache_dir=str(forge.cache_dir),
                     timeout=INIT_TIMEOUT)
     proc.notify("$/cancelRequest", {"id": 999999})   # cancel for unknown id
     proc.notify("window/logMessage", {"message": "unsolicited"})

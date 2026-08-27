@@ -401,6 +401,12 @@ class Fixture:
     def __init__(self, root, org=None):
         self.root = Path(root)
         self.org = org or os.environ.get("FORGE_ORG", "local")
+        #: Where the adapter's disk cache is rooted at every initialize
+        #: (§Handshake cache budget): a SIBLING of the materialized
+        #: fixture, never inside it — the served tree must stay exactly
+        #: the canonical fixture, or a caching adapter serves its own
+        #: cache as a repo.
+        self.cache_dir = Path(f"{self.root}-cache")
 
     def repo_id(self, name):
         return f"{self.org}/{name}"

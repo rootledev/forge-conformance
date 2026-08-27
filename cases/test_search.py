@@ -19,8 +19,14 @@ def test_FC030_path_only_hit_empty_matches_legal(adapter, forge):
     fc_assert(isinstance(items, list) and items, *c,
               "extension:txt over the fixture must yield items (alpha has "
               f"three .txt files, beta one): {result!r}")
+    canonical = {forge.repo_id("alpha"), forge.repo_id("beta")}
     for item in items:
         check_code_item(item, "FC-030", c[2], where=item.get("path", "?"))
+        fc_assert(item["repo"] in canonical, *c,
+                  "the fixture is closed-world — search must only report the "
+                  "canonical repos (an adapter whose disk cache or scratch "
+                  "leaks into the served tree shows up here): "
+                  f"{item['repo']!r} not in {sorted(canonical)}")
     path_only = [i for i in items if i.get("matches", []) == []]
     fc_assert(path_only, *c,
               "the suite must observe at least one path-only hit (empty "

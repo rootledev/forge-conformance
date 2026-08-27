@@ -95,7 +95,7 @@ def adapter(forge):
     rootle's advisory cache params; torn down at module end."""
     proc = AdapterProc(provider_argv(forge.root), env=suite_env_for(forge))
     proc.initialize(cache_bytes=CACHE_BYTES,
-                    cache_dir=str(forge.root.parent / "cache"))
+                    cache_dir=str(forge.cache_dir))
     yield proc
     proc.close()
 
