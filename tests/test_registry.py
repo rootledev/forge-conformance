@@ -1,6 +1,8 @@
 """The registry is the contract: stable numbered cases, citable across
 adapters, docs, and bug reports. This gate pins the plan-0015
-enumeration — the case never renames, the set never silently shrinks."""
+enumeration plus the v1.5 revision group (plan-0016 M1) — the case
+never renames, the set never silently shrinks."""
+
 
 from cases.registry import CASES
 
@@ -14,6 +16,9 @@ PLAN_ENUMERATION = {
     "FC-060", "FC-061", "FC-062", "FC-063",
     "FC-070",
     "FC-080",
+    # v1.5 revisions (plans/0016 M1)
+    "FC-090", "FC-091", "FC-092", "FC-093", "FC-094",
+    "FC-095", "FC-096", "FC-097", "FC-098", "FC-099",
 }
 
 

@@ -1,8 +1,9 @@
 # The canonical fixture
 
 The fixture is the mini-backend every adapter under test serves: two
-repos under the adapter's org (`FORGE_ORG`, default `local` →
-`local/alpha`, `local/beta`). Content is **frozen and
+frozen repos and one materialized git repo under the adapter's org
+(`FORGE_ORG`, default `local` → `local/alpha`, `local/beta`,
+`local/vcs`). The alpha/beta content is **frozen and
 manifest-hashed** (`fixture/MANIFEST.sha256`): the suite verifies its
 materialized copy against the manifest before every run, and
 deterministic bytes mean expectations are computable without assuming
@@ -31,6 +32,47 @@ values).
 |---|---|
 | `notes.txt` | `needle` on line 2 — a second repo so streaming yields ≥2 batches (the reference adapter streams per repo) |
 | `todo.md` | `needle` — another needle carrier |
+
+## vcs — the revision repo (v1.5, FC-090..099)
+
+`fixture/vcs/` is not served as frozen files: at suite materialization
+the harness builds a **real git repo** from them (`forge.build_vcs`,
+offline — `git init` plus fixed identity and
+GIT_AUTHOR_DATE/GIT_COMMITTER_DATE, so commit ids are deterministic
+across machines and runs). The frozen files are the inputs; the
+builder derives every historical state from them (line prefixes), so
+they stay the single source of truth:
+
+| Input | Encodes |
+|---|---|
+| `README.md` | stable content across branches (FC-093's same-id assert) |
+| `HISTORY.md` | 3 lines, one commit each — the log file (FC-094/095) |
+| `BLAME.md` | lines 1–2 seeded, line 3 appended — the two-commit blame file (FC-098) |
+| `DIVERGES.main.md` / `DIVERGES.feature.md` | the one file that differs between branches, committed as `DIVERGES.md` (FC-091/093/096) |
+
+The graph (`main`, newest last):
+
+```
+c1 seed (README + HISTORY@1) → c2 HISTORY@2 → c3 BLAME@2
+   → c4 DIVERGES(main) → c5 BLAME@3 → c6 HISTORY@3   ← tag v1.0
+feature: branches at c4, one commit rewriting DIVERGES.md
+```
+
+Expectations are computed from the built repo via git (commit ids,
+author dates, blob bytes) — never hard-coded — so the cases stay
+correct whatever ids git produced. The worktree ends on `main`,
+byte-equal to the frozen finals, which keeps the plain walk and the
+ref-serving paths consistent (§Content ids: ids are sha256-of-bytes
+for the reference adapter, but the suite never assumes a scheme).
+
+**Content invariants:** the vcs files carry no `needle` substring and
+no `*.txt` paths — the six-file needle set and the `extension:txt`
+sets documented above stay exact with the third repo present.
+
+**Gating:** when git is unavailable in the environment the repo is
+not built, the vendored reference honestly declares
+`refs`/`log`/`blame` false, and FC-090..098 skip with a reason that
+says so (FC-099 still runs — capability honesty needs no repo).
 
 ## Search term distribution
 

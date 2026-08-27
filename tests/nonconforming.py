@@ -18,7 +18,10 @@ claims and nothing it doesn't:
 
 Everything else behaves exactly like the reference adapter — that is
 the point: a gate that failed more than FC-013/FC-043 against this
-adapter would be over-fitted.
+adapter would be over-fitted. (The v1.5 revision surfaces ride the
+same rule: ref-mode trees and blob_at ids are salted like every other
+content id; refs/log/blame carry commit ids, which stay the
+reference's — the salt exists to break content-keyed caching.)
 """
 
 import base64
@@ -39,8 +42,9 @@ def salted(sha):
     return fs_provider.sha256((SALT + ":" + sha).encode())
 
 
-def salted_tree(root, repo):
-    return [dict(e, sha=salted(e["sha"])) for e in fs_provider.walk_tree(root, repo)]
+def salted_tree(root, repo, ref=None):
+    return [dict(e, sha=salted(e["sha"]))
+            for e in fs_provider.walk_tree(root, repo, ref=ref)]
 
 
 def salted_items(items):
@@ -76,8 +80,15 @@ def main() -> None:
             params = req.get("params") or {}
             method = req.get("method", "")
             if method == "repo/tree":
-                result = {"entries": salted_tree(root, params["repo"]),
-                          "truncated": False, "branch": "main"}
+                result = {"entries": salted_tree(root, params["repo"],
+                                                 ref=params.get("ref")),
+                          "truncated": False,
+                          "branch": params.get("ref") or "main"}
+            elif method == "repo/blob_at":
+                # ids are salted like every other content id; the bytes
+                # stay the reference's
+                result = fs_provider.handle(root, method, params)
+                result["sha"] = salted(result["sha"])
             elif method == "repo/blob":
                 data = salted_blob(root, params["repo"], params["sha"])
                 result = {"bytes_b64": base64.b64encode(data).decode()}

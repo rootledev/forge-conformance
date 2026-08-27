@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -407,6 +408,10 @@ class Fixture:
         #: the canonical fixture, or a caching adapter serves its own
         #: cache as a repo.
         self.cache_dir = Path(f"{self.root}-cache")
+        #: The materialized git repo under fixture/vcs (v1.5 revision
+        #: cases FC-090..099), or None when git is unavailable in this
+        #: environment — the revision group then skips (FIXTURES.md).
+        self.vcs = None
 
     def repo_id(self, name):
         return f"{self.org}/{name}"
@@ -446,6 +451,194 @@ class Fixture:
 
     def replace(self, name, rel, data):
         self.path(name, rel).write_bytes(data)
+
+
+# --------------------------------------------------------------------------
+# VCS fixture (v1.5 revisions, FC-090..099)
+# --------------------------------------------------------------------------
+
+class VcsFixture:
+    """The materialized git repo under ``fixture/vcs``.
+
+    The repo IS the fixture: expectations are computed from it via
+    git (commit ids, author dates, blob bytes), never hard-coded —
+    the suite compares the adapter's answers against git's, so the
+    cases stay correct whatever shas git produced (§Content ids keeps
+    ids opaque; here even the ids are reproducible, which makes
+    "restore exactly" trivially true).
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def git(self, *args):
+        """Run git in the fixture repo; stdout (text), checked."""
+        proc = subprocess.run(["git", "-C", str(self.path), *args],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"fixture/vcs: git {' '.join(args)} failed: "
+                f"{proc.stderr.strip()}")
+        return proc.stdout
+
+    def rev_parse(self, ref):
+        return self.git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+
+    def head_branch(self):
+        return self.git("symbolic-ref", "--short", "HEAD").strip()
+
+    def author_date_iso(self, ref):
+        """Author date of a commit, ISO-8601 (git's %aI)."""
+        return self.git("show", "-s", "--format=%aI", ref).strip()
+
+    def log_shas(self, ref, path=None):
+        """Commit ids touching path (or all of them), newest first."""
+        args = ["log", "--format=%H", ref]
+        if path is not None:
+            args += ["--", path]
+        return [s for s in self.git(*args).splitlines() if s]
+
+    def show_bytes(self, ref, path):
+        proc = subprocess.run(["git", "-C", str(self.path), "show",
+                               f"{ref}:{path}"], capture_output=True)
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"fixture/vcs: git show {ref}:{path} failed")
+        return proc.stdout
+
+
+#: Fixed identity and dates: commit ids are deterministic across
+#: machines and git versions (same content, parents, and metadata —
+#: §Content ids only demands ids move when content moves; here even
+#: the values reproduce, so two suite runs see identical fixtures).
+VCS_AUTHOR = ("Forge Conformance", "forge@conformance.local")
+VCS_DATES = {
+    "c1": "2026-01-01T10:00:00+00:00",  # seed: README + HISTORY line 1
+    "c2": "2026-01-02T10:00:00+00:00",  # HISTORY line 2
+    "c3": "2026-01-03T10:00:00+00:00",  # BLAME lines 1-2
+    "c4": "2026-01-04T10:00:00+00:00",  # DIVERGES.md (main variant)
+    "c5": "2026-01-05T10:00:00+00:00",  # BLAME line 3
+    "c6": "2026-01-06T10:00:00+00:00",  # HISTORY line 3 (tag v1.0)
+    "feature": "2026-01-05T12:00:00+00:00",  # feature's diverging commit
+}
+
+
+def _vcs_env(when):
+    """Hermetic git environment: scrubbed of outside GIT_* overrides,
+    fixed identity and dates (commit ids depend on all of them)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    name, mail = VCS_AUTHOR
+    env.update({
+        "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": mail,
+        "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": mail,
+        "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when,
+        # Hermetic on git >= 2.32; older git ignores unknown env vars
+        # (the -c commit.gpgsign=false override covers the one config
+        # that could otherwise make commits nondeterministic).
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+    })
+    return env
+
+
+def _lines(content: bytes, n: int) -> bytes:
+    """First n lines of frozen content, newline-terminated — the
+    builder derives each historical state from the frozen final file,
+    so the frozen files stay the single source of truth."""
+    return ("\n".join(content.decode().splitlines()[:n]) + "\n").encode()
+
+
+def build_vcs(dest) -> VcsFixture | None:
+    """Materialize ``fixture/vcs`` — a small real git repo (offline,
+    deterministic; plans/0016 M1).
+
+    The frozen files under fixture/vcs are the inputs; this drives
+    git to the shape the revision cases encode (see FIXTURES.md):
+
+      main:    c1 seed, c2 HISTORY@2, c3 BLAME@2, c4 DIVERGES(main),
+               c5 BLAME@3, c6 HISTORY@3  <- lightweight tag v1.0
+      feature: branches at c4, one commit rewriting DIVERGES.md
+
+    Returns None when git is unavailable — FC-090..098 then skip with
+    a reason that says so (the suite never assumes the environment).
+    """
+    dest = Path(dest)
+    try:
+        if shutil.which("git") is None:
+            return None
+        probe = subprocess.run(["git", "--version"], capture_output=True,
+                               text=True)
+        if probe.returncode != 0:
+            return None
+    except OSError:
+        return None
+
+    inputs = {name: (dest / name).read_bytes() for name in
+              ("README.md", "HISTORY.md", "BLAME.md",
+               "DIVERGES.main.md", "DIVERGES.feature.md")}
+    history = inputs["HISTORY.md"].decode().splitlines()
+    blame = inputs["BLAME.md"].decode().splitlines()
+    assert len(history) == 3 and len(blame) == 3, (
+        "fixture/vcs drifted: HISTORY.md and BLAME.md must stay exactly "
+        "three lines each (the builder derives history from them)")
+    for name in inputs:
+        (dest / name).unlink()
+
+    def write(name, data):
+        (dest / name).write_bytes(data)
+
+    def git(when, *args):
+        proc = subprocess.run(["git", "-C", str(dest), *args],
+                              capture_output=True, text=True,
+                              env=_vcs_env(when))
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"fixture/vcs build: git {' '.join(args)} failed: "
+                f"{proc.stderr.strip()}")
+        return proc.stdout
+
+    def commit(key, message):
+        git(VCS_DATES[key], "add", "-A")
+        git(VCS_DATES[key], "-c", "commit.gpgsign=false", "commit",
+            "-q", "-m", message)
+
+    git(VCS_DATES["c1"], "init", "-q")
+    git(VCS_DATES["c1"], "symbolic-ref", "HEAD", "refs/heads/main")
+
+    write("README.md", inputs["README.md"])
+    write("HISTORY.md", _lines(inputs["HISTORY.md"], 1))
+    commit("c1", "chore: seed the repo (readme, first history entry)")
+    write("HISTORY.md", _lines(inputs["HISTORY.md"], 2))
+    commit("c2", "docs(history): second entry")
+    write("BLAME.md", _lines(inputs["BLAME.md"], 2))
+    commit("c3", "docs(blame): seed two lines")
+    write("DIVERGES.md", inputs["DIVERGES.main.md"])
+    commit("c4", "docs: add the diverging doc")
+    write("BLAME.md", _lines(inputs["BLAME.md"], 3))
+    commit("c5", "docs(blame): append the third line")
+    write("HISTORY.md", _lines(inputs["HISTORY.md"], 3))
+    commit("c6", "docs(history): third entry")
+    git(VCS_DATES["c6"], "tag", "v1.0")  # lightweight, at main's head
+
+    fork = git(VCS_DATES["c6"], "rev-parse", "HEAD~2").strip()  # c4
+    git(VCS_DATES["feature"], "checkout", "-q", "-b", "feature", fork)
+    write("DIVERGES.md", inputs["DIVERGES.feature.md"])
+    commit("feature", "feat: diverge the doc on feature")
+    git(VCS_DATES["c6"], "checkout", "-q", "main")
+
+    vcs = VcsFixture(dest)
+    main_sha, feature_sha = vcs.rev_parse("main"), vcs.rev_parse("feature")
+    assert main_sha != feature_sha and vcs.git("merge-base", "main",
+                                               "feature").strip() == fork
+    assert vcs.rev_parse("refs/tags/v1.0") == main_sha
+    assert vcs.head_branch() == "main"
+    # The worktree ends on main, byte-equal to the frozen finals —
+    # the plain (worktree-walking) and ref-serving paths agree.
+    for name, want in (("README.md", inputs["README.md"]),
+                       ("HISTORY.md", _lines(inputs["HISTORY.md"], 3)),
+                       ("BLAME.md", _lines(inputs["BLAME.md"], 3)),
+                       ("DIVERGES.md", inputs["DIVERGES.main.md"])):
+        assert (dest / name).read_bytes() == want, f"fixture/vcs: {name}"
+    return vcs
 
 
 def check_code_item(item, cid, spec, where=""):

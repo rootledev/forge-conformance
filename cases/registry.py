@@ -6,11 +6,14 @@ README index and the registry completeness gate (tests/test_registry.py);
 case modules import their entries so test bodies and docs cannot drift.
 
 Layout: FC-id -> (group module, title, spec section in
-rootledev/rootle doc/provider-protocol.md v1.3).
+doc/provider-protocol.md v1.5).
 """
 
 # Handshake (v1)
 HANDSHAKE = "§Handshake"
+
+# Revisions (v1.5, plans/0016 M1)
+REVISIONS = "§Methods (Revisions, v1.5)"
 
 CASES = {
     # -- Handshake (v1) -----------------------------------------------------
@@ -91,6 +94,27 @@ CASES = {
     # -- Icons (v1.3) --------------------------------------------------------
     "FC-080": ("test_icons", "icon is absent, a builtin name, or a single glyph",
                HANDSHAKE + " (icon, v1.3)"),
+    # -- Revisions (v1.5) ----------------------------------------------------
+    "FC-090": ("test_revisions", "refs shape: branches/tags arrays, sha present, at most one default",
+               HANDSHAKE + " (capabilities, v1.5) + " + REVISIONS),
+    "FC-091": ("test_revisions", "tree at ref serves that ref (diverging file differs; branch echoes)",
+               REVISIONS),
+    "FC-092": ("test_revisions", "tree at unknown ref -> error (not_found preferred)",
+               REVISIONS + " + §Errors"),
+    "FC-093": ("test_revisions", "sha discipline across refs: different content -> different ids, same content -> same id",
+               REVISIONS + " + §Content ids"),
+    "FC-094": ("test_revisions", "log shape: newest-first, ISO-8601 dates, path filter narrows",
+               REVISIONS),
+    "FC-095": ("test_revisions", "log limit stops at ~N and sets truncated: true",
+               REVISIONS + " (bounded compute)"),
+    "FC-096": ("test_revisions", "blob_at serves the ref's bytes; sha matches the tree-at-ref entry",
+               REVISIONS),
+    "FC-097": ("test_revisions", "blob_at unknown path/ref -> not_found",
+               REVISIONS + " + §Errors"),
+    "FC-098": ("test_revisions", "blame ranges: 1-based, cover every line, same-sha coalesced, right shas",
+               REVISIONS),
+    "FC-099": ("test_revisions", "capability honesty: refs/log/blame are booleans; false is never asked",
+               HANDSHAKE + " (capabilities, v1.5)"),
 }
 
 

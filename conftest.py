@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from forge import AdapterProc, Fixture  # noqa: E402
+from forge import AdapterProc, Fixture, build_vcs  # noqa: E402
 
 ROOT = Path(__file__).parent
 FIXTURE_SRC = ROOT / "fixture"
@@ -71,7 +71,11 @@ def materialize(dest: Path) -> Fixture:
             f"the canonical content"
         )
     manifest.unlink()  # not part of the served tree
-    return Fixture(dest)
+    fixture = Fixture(dest)
+    # v1.5: fixture/vcs is a real git repo built here (deterministic,
+    # offline); None when git is unavailable — FC-090..098 then skip.
+    fixture.vcs = build_vcs(dest / "vcs")
+    return fixture
 
 
 @pytest.fixture(scope="session")
