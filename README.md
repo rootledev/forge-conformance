@@ -9,7 +9,7 @@ case never renames).
 
 The authoritative protocol document is
 [`doc/provider-protocol.md`](https://github.com/rootledev/rootle/blob/main/doc/provider-protocol.md)
-(v1.3) in rootledev/rootle; every case cites the section it encodes in
+(v1.5) in rootledev/rootle; every case cites the section it encodes in
 its failure output.
 
 ## Usage
@@ -33,14 +33,19 @@ pass/fail with the spec section on failure. Python 3.10+ stdlib +
 ### Adapter contract for running the suite
 
 The suite materializes a private copy of the canonical [`fixture/`](FIXTURES.md)
-(two repos, `alpha` and `beta`) and hands it to your adapter:
+— two frozen repos (`alpha`, `beta`) plus a real git repo (`vcs`,
+built at materialization from frozen inputs with deterministic
+commits) — and hands it to your adapter:
 
 - the fixture directory is **appended as the final argv element**, or
   substituted for a `{fixture}` placeholder in your command;
 - it is always exported as `FORGE_FIXTURE_DIR`;
 - set `FORGE_NO_APPEND=1` if your adapter takes no path argument;
-- your adapter serves the two repos as `<org>/alpha` and `<org>/beta`,
-  where `<org>` is `FORGE_ORG` (default `local`);
+- your adapter serves the repos as `<org>/alpha`, `<org>/beta`, and
+  `<org>/vcs`, where `<org>` is `FORGE_ORG` (default `local`) — the
+  revision group (FC-090..098) asks its questions against `vcs`, a
+  real git repo built offline at materialization (skip-gated on the
+  `refs`/`log`/`blame` capabilities and on git being present);
 - all credential environment variables are scrubbed from the child's
   environment (`FORGE_TOKEN`, `GITLAB_TOKEN`, `GITHUB_TOKEN`, …) — the
   canonical fixture must be servable with no credentials (they are
@@ -58,7 +63,7 @@ The suite materializes a private copy of the canonical [`fixture/`](FIXTURES.md)
 
 ## The case matrix
 
-37 cases. `cases/` holds one module per group; `cases/registry.py` is
+47 cases. `cases/` holds one module per group; `cases/registry.py` is
 the single source of truth (the table below mirrors it; tests gate the
 two against each other). Failure output always carries the case ID,
 its title, and the spec citation.
@@ -111,6 +116,17 @@ its title, and the spec citation.
 | FC-070 | honoring limit stops at ~N and sets truncated: true | §Methods search/code (bounded compute, advisory) |
 | **Icons (v1.3)** | | |
 | FC-080 | icon is absent, a builtin name, or a single glyph | §Handshake (icon, v1.3) |
+| **Revisions (v1.5)** | | |
+| FC-090 | refs shape: branches/tags arrays, sha present, at most one default | §Handshake (capabilities, v1.5) + §Methods (Revisions, v1.5) |
+| FC-091 | tree at ref serves that ref (diverging file differs; branch echoes) | §Methods (Revisions, v1.5) |
+| FC-092 | tree at unknown ref -> error (not_found preferred) | §Methods (Revisions, v1.5) + §Errors |
+| FC-093 | sha discipline across refs: different content -> different ids, same content -> same id | §Methods (Revisions, v1.5) + §Content ids |
+| FC-094 | log shape: newest-first, ISO-8601 dates, path filter narrows | §Methods (Revisions, v1.5) |
+| FC-095 | log limit stops at ~N and sets truncated: true | §Methods (Revisions, v1.5) (bounded compute) |
+| FC-096 | blob_at serves the ref's bytes; sha matches the tree-at-ref entry | §Methods (Revisions, v1.5) |
+| FC-097 | blob_at unknown path/ref -> not_found | §Methods (Revisions, v1.5) + §Errors |
+| FC-098 | blame ranges: 1-based, cover every line, same-sha coalesced, right shas | §Methods (Revisions, v1.5) |
+| FC-099 | capability honesty: refs/log/blame are booleans; false is never asked | §Handshake (capabilities, v1.5) |
 
 ### Case semantics worth knowing
 
@@ -137,6 +153,19 @@ its title, and the spec citation.
   first** (`src/provider/stdio/tests.rs` fake-provider modes
   `stream-search`, `stream-slow`, `die-mid-stream`), so case semantics
   match what rootle actually enforces.
+- **The revision group reads capabilities first** (FC-099): an adapter
+  declaring `refs`/`log`/`blame` false (or omitting them — default
+  false) is never asked the corresponding methods; those cases skip
+  with a reason citing the case id. When git is unavailable in the
+  environment the `vcs` repo is not built and FC-090..098 skip with a
+  reason saying exactly that.
+- **FC-095 requires the honor path** (unlike FC-070's dual outcome):
+  the v1.5 spec couples `repo/log`'s `limit` to bounded compute — stop
+  at ~N and set `truncated: true` when more provably exists (the
+  fixture's 3-commit file makes "more" provable at limit 2).
+- **FC-094/FC-098 compute expectations from git itself** (commit ids,
+  author dates, blob bytes at refs) — the suite never hard-codes shas,
+  so the cases hold for any deterministic build of `fixture/vcs`.
 
 ## The gate proves the gate
 
@@ -147,24 +176,33 @@ salted ids — and FC-043 — a 4s silent gap mid-stream).
 fails **exactly** FC-013 and FC-043 and nothing else: a gate that
 missed those would be under-fitted, one that failed more would be
 over-fitted. `tests/test_registry.py` pins the case set against the
-plan-0015 enumeration so numbering cannot silently drift.
+plan-0015 enumeration plus the v1.5 revision group (plans/0016 M1) so
+numbering cannot silently drift. `tests/incapable.py` is the inverse
+gate: it declares the revision trio false and hard-fails every
+revision ask — `tests/test_capability_gating.py` proves the suite
+skips the group and stays green against it (the "never asked" half of
+FC-099).
 
 ## The reference adapter
 
-[`vendor/fs_provider.py`](vendor/fs_provider.py) is a verbatim copy of
-rootle's reference stdio provider (see
-[vendor/README.md](vendor/README.md) for provenance). The suite runs
-green against it on every push — a red suite against the reference
-means the suite is wrong, not the adapter.
+[`vendor/fs_provider.py`](vendor/fs_provider.py) is the vendored
+reference adapter — the plan-0015 verbatim copy of rootle's
+`examples/providers/fs_provider.py`, **extended in-tree with the v1.5
+revision methods** (refs / tree-at-ref / blob_at / log / blame via
+the git CLI, capabilities declared honestly per git availability; see
+[vendor/README.md](vendor/README.md) for provenance and the delta).
+The suite runs green against it on every push — a red suite against
+the reference means the suite is wrong, not the adapter.
 
 ## Layout
 
 ```
 run                     entry: python3 run -- <provider-command...>
 forge.py                wire client (mirrors rootle's StdioProvider) + helpers
+                        + fixture/vcs builder (deterministic git repo)
 cases/                  one module per case group; registry.py = case table
-fixture/                the canonical mini-backend dataset (+ MANIFEST.sha256)
+fixture/                the canonical mini-backend dataset (+ MANIFEST.sha256;
+                        vcs/ holds frozen inputs, materialized into a git repo)
 FIXTURES.md             what the fixture encodes and why
-vendor/fs_provider.py   vendored reference adapter
-tests/                  the nonconforming gate + registry pins
-```
+vendor/fs_provider.py   vendored reference adapter (+ v1.5 revision extension)
+tests/                  the nonconforming + capability gates, registry pins

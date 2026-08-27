@@ -13,8 +13,12 @@ Protocol v1 methods:
     initialize            -> {protocol, name, capabilities}
     search/repos  {query} -> {items: [{full_name} | {org}]}
     org/repos     {org}   -> {repos: [name]}
-    repo/tree     {repo}  -> {entries: [{path, type, sha, size?}], truncated, branch}
+    repo/tree     {repo, ref?} -> {entries, truncated, branch}
     repo/blob     {repo, sha} -> {bytes_b64}
+    repo/blob_at  {repo, path, ref?} -> {bytes_b64, sha}   (v1.5)
+    repo/refs     {repo}  -> {branches, tags}               (v1.5, git)
+    repo/log      {repo, path?, ref?, limit?} -> {items}    (v1.5, git)
+    repo/blame    {repo, path, ref?} -> {ranges}            (v1.5, git)
     search/code   {q}     -> {items: [{repo, path, sha, branch, matches}]}
 
 Contract: blob shas are content hashes (sha256) — they change when
@@ -26,9 +30,12 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
+
 
 ORG = "local"
 SKIP_DIRS = {".git", "__pycache__", "target", "node_modules"}
@@ -36,6 +43,112 @@ SKIP_DIRS = {".git", "__pycache__", "target", "node_modules"}
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+class NotFound(ValueError):
+    """A miss the UI should render as not_found (§Errors kinds, v1.1)."""
+
+
+_git_checked = False
+_git_ok = False
+
+
+def git_available() -> bool:
+    """True when a working git binary is on PATH (probed once).
+
+    The v1.5 revision trio (refs/log/blame) is served through git
+    when present and honestly declared false otherwise (§Handshake:
+    absent means default false — a backend that can, says so)."""
+    global _git_checked, _git_ok
+    if not _git_checked:
+        _git_ok = False
+        path = shutil.which("git")
+        if path:
+            try:
+                subprocess.run([path, "--version"], capture_output=True,
+                               check=True, timeout=15)
+                _git_ok = True
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _git_checked = True
+    return _git_ok
+
+
+def _git(repo_path: str, *args: str) -> bytes:
+    """Run git in a repo dir; git's failure text becomes NotFound."""
+    if not git_available():
+        raise NotFound("git is not available")
+    proc = subprocess.run(["git", "-C", repo_path, *args],
+                          capture_output=True)
+    if proc.returncode != 0:
+        detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise NotFound(detail[-1] if detail else f"git {args[0]} failed")
+    return proc.stdout
+
+
+def _safe_ref(ref) -> str:
+    """Refs ride argv: refuse option-looking or empty values (an
+    unknown ref is the caller's NotFound, never an option injection)."""
+    if not isinstance(ref, str) or not ref.strip() or ref.lstrip().startswith("-"):
+        raise NotFound(f"unknown ref {ref!r}")
+    return ref.strip()
+
+
+def _safe_path(path) -> str:
+    """Normalize a repo-relative path; traversal and absolutes miss."""
+    if not isinstance(path, str) or not path.strip():
+        raise NotFound(f"no path {path!r}")
+    parts = []
+    for part in path.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise NotFound(f"no path {path!r}")
+        parts.append(part)
+    if not parts:
+        raise NotFound(f"no path {path!r}")
+    return "/".join(parts)
+
+
+def _default_branch(repo_path: str) -> str:
+    """HEAD's branch name ("" when detached or not a git repo)."""
+    if not git_available():
+        return ""
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "symbolic-ref", "--quiet", "--short", "HEAD"],
+        capture_output=True)
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.decode("utf-8", "replace").strip()
+
+
+def _is_git_repo(repo_path: str) -> bool:
+    if not git_available():
+        return False
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "rev-parse", "--is-inside-work-tree"],
+        capture_output=True)
+    return proc.returncode == 0 and proc.stdout.strip() == b"true"
+
+
+def _resolve_commit(repo_path: str, ref: str) -> str:
+    """Peel ref to a commit id (tags peel); unknown ref -> NotFound."""
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "rev-parse", "--verify", "--quiet",
+         f"{ref}^{{commit}}"], capture_output=True)
+    sha = proc.stdout.decode().strip()
+    if proc.returncode != 0 or not sha:
+        raise NotFound(f"unknown ref {ref!r}")
+    return sha
+
+
+def _iso_date(ts: str, tz: str) -> str:
+    """git author-time/author-tz -> ISO-8601 (same shape as %aI)."""
+    off = timedelta(hours=int(tz[1:3]), minutes=int(tz[3:5]))
+    if tz.startswith("-"):
+        off = -off
+    return datetime.fromtimestamp(int(ts), timezone(off)).isoformat()
+
 
 
 def list_repos(root: str) -> list[str]:
@@ -74,9 +187,16 @@ def repo_dir(root: str, repo: str) -> str:
     return path
 
 
-def walk_tree(root: str, repo: str) -> list[dict]:
-    """Recursive entries: blobs content-hashed, dirs path-hashed."""
+def walk_tree(root: str, repo: str, ref: str | None = None) -> list[dict]:
+    """Recursive entries: blobs content-hashed, dirs path-hashed.
+
+    v1.5: ``ref`` serves that branch/tag/sha's tree through git
+    ls-tree. Content ids stay sha256-of-bytes — an id means the same
+    bytes at every ref, which is what rootle's content-keyed cache
+    requires (§Content ids)."""
     base = repo_dir(root, repo)
+    if ref is not None:
+        return _walk_tree_at_ref(base, _safe_ref(ref))
     entries = []
     for dirpath, dirnames, filenames in os.walk(base):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
@@ -95,12 +215,162 @@ def walk_tree(root: str, repo: str) -> list[dict]:
     return entries
 
 
+def _walk_tree_at_ref(base: str, ref: str) -> list[dict]:
+    _resolve_commit(base, ref)
+    out = _git(base, "ls-tree", "-r", "-t", "--long", "-z", ref)
+    entries = []
+    for record in out.decode("utf-8", "surrogateescape").split("\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition("\t")
+        _mode, otype, osha, size = meta.split()
+        if otype == "tree":
+            entries.append({"path": path, "type": "tree", "sha": sha256(path.encode())})
+        else:
+            data = _git(base, "cat-file", "blob", osha)
+            entries.append({"path": path, "type": "blob",
+                            "sha": sha256(data), "size": int(size)})
+    return entries
+
+
 def blob_by_sha(root: str, repo: str, sha: str) -> bytes:
     for entry in walk_tree(root, repo):
         if entry["type"] == "blob" and entry["sha"] == sha:
             with open(os.path.join(repo_dir(root, repo), entry["path"]), "rb") as f:
                 return f.read()
+    # v1.5: a git-backed repo can hold the bytes at another ref the
+    # worktree no longer shows (fixture-scale sweep, never hit on the
+    # plain path — the worktree walk above is unchanged).
+    base = repo_dir(root, repo)
+    if _is_git_repo(base):
+        out = _git(base, "for-each-ref", "--format=%(refname)",
+                   "refs/heads", "refs/tags").decode()
+        for ref in filter(None, out.splitlines()):
+            ls = _git(base, "ls-tree", "-r", "-z", ref)
+            for record in ls.decode("utf-8", "surrogateescape").split("\0"):
+                if not record:
+                    continue
+                meta = record.partition("\t")[0]
+                _mode, otype, osha = meta.split()[:3]
+                if otype != "blob":
+                    continue
+                data = _git(base, "cat-file", "blob", osha)
+                if sha256(data) == sha:
+                    return data
     raise ValueError(f"no blob {sha} in {repo}")
+
+
+def blob_at(root: str, repo: str, path: str, ref: str | None = None) -> tuple[bytes, str]:
+    """v1.5 repo/blob_at: bytes + content id of path at ref (the
+    default branch — for fs, the worktree — when ref is absent)."""
+    base = repo_dir(root, repo)
+    rel = _safe_path(path)
+    if ref is None:
+        full = os.path.join(base, rel)
+        if not os.path.isfile(full):
+            raise NotFound(f"no path {path!r} in {repo}")
+        with open(full, "rb") as f:
+            data = f.read()
+        return data, sha256(data)
+    data = _git(base, "show", f"{_safe_ref(ref)}:{rel}")
+    return data, sha256(data)
+
+
+def list_refs(root: str, repo: str) -> dict:
+    """v1.5 repo/refs: branches (HEAD's branch marked default — at
+    most one) and tags, from the repo git actually holds."""
+    base = repo_dir(root, repo)
+    if not _is_git_repo(base):
+        raise NotFound(f"{repo} has no refs (not a git repo)")
+    head = _default_branch(base)
+
+    def listing(prefix: str) -> list[tuple[str, str]]:
+        out = _git(base, "for-each-ref",
+                   "--format=%(refname:short)%09%(objectname)", prefix)
+        pairs = []
+        for line in out.decode().splitlines():
+            if line:
+                name, _, osha = line.partition("\t")
+                pairs.append((name, osha.strip()))
+        return pairs
+
+    branches = [{"name": n, "sha": s, "default": True} if n == head
+                else {"name": n, "sha": s}
+                for n, s in listing("refs/heads")]
+    tags = [{"name": n, "sha": s} for n, s in listing("refs/tags")]
+    return {"branches": branches, "tags": tags}
+
+
+_LOG_FORMAT = "%H%x1f%s%x1f%an%x1f%aI%x1e"
+
+
+def repo_log(root: str, repo: str, path: str | None = None,
+             ref: str | None = None, limit=None) -> dict:
+    """v1.5 repo/log: newest first, ISO-8601 dates; limit rides the
+    bounded-compute contract — stop at ~N and set truncated: true."""
+    base = repo_dir(root, repo)
+    rev = _safe_ref(ref) if ref is not None else (_default_branch(base) or "HEAD")
+    rev = _resolve_commit(base, rev)
+    capped = isinstance(limit, int) and not isinstance(limit, bool) and limit > 0
+    args = ["log", f"--format={_LOG_FORMAT}"]
+    if capped:
+        args += ["-n", str(limit)]
+    args.append(rev)
+    if path is not None:
+        args += ["--", _safe_path(path)]
+    items = []
+    for record in _git(base, *args).decode("utf-8", "surrogateescape").split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        sha, subject, author, date = record.split("\x1f")
+        items.append({"sha": sha, "subject": subject, "author": author, "date": date})
+    truncated = False
+    if capped:
+        count_args = ["rev-list", "--count", rev]
+        if path is not None:
+            count_args += ["--", _safe_path(path)]
+        total = int(_git(base, *count_args).decode().strip() or "0")
+        truncated = total > len(items)
+    return {"items": items, "truncated": truncated}
+
+
+def repo_blame(root: str, repo: str, path: str, ref: str | None = None) -> dict:
+    """v1.5 repo/blame: 1-based inclusive ranges covering every line,
+    adjacent same-sha ranges coalesced (git --line-porcelain)."""
+    base = repo_dir(root, repo)
+    rev = _safe_ref(ref) if ref is not None else (_default_branch(base) or "HEAD")
+    _resolve_commit(base, rev)
+    out = _git(base, "blame", "--line-porcelain", rev, "--",
+               _safe_path(path)).decode("utf-8", "surrogateescape")
+    lines = []
+    cur = None
+    for raw in out.splitlines():
+        if raw.startswith("\t"):
+            if cur is not None:
+                lines.append(cur)
+                cur = None
+            continue
+        if cur is None:
+            cur = {"sha": raw.split(" ", 1)[0]}
+        elif raw.startswith("author-time "):
+            cur["ts"] = raw.split(" ", 1)[1].strip()
+        elif raw.startswith("author-tz "):
+            cur["tz"] = raw.split(" ", 1)[1].strip()
+        elif raw.startswith("author "):
+            cur["author"] = raw.split(" ", 1)[1]
+    if not lines:
+        raise NotFound(f"no path {path!r} in {repo}")
+    ranges = []
+    for n, info in enumerate(lines, start=1):
+        if ranges and ranges[-1]["sha"] == info["sha"]:
+            ranges[-1]["end_line"] = n  # coalesce adjacent same-sha
+        else:
+            ranges.append({"start_line": n, "end_line": n, "sha": info["sha"],
+                           "author": info.get("author", ""),
+                           "date": _iso_date(info.get("ts", "0"),
+                                             info.get("tz", "+0000"))})
+    return {"ranges": ranges}
 
 
 def parse_query(q: str) -> tuple[str, str | None, str | None, str | None]:
@@ -212,13 +482,19 @@ def search_code_batches(root: str, q: str) -> Iterator[list[dict]]:
 
 def handle(root: str, method: str, params: dict) -> dict:
     if method == "initialize":
+        git_ok = git_available()
         return {
             "protocol": 1,
             "name": "fs",
             # v1.3: the modeline icon — a builtin name rootle maps to
             # its Nerd Font glyph when nerd_font is on.
             "icon": "folder",
-            "capabilities": {"orgs": True, "code_search": True},
+            "capabilities": {
+                "orgs": True, "code_search": True,
+                # v1.5 revision trio, honest: served through git when
+                # a working git is on PATH, else default-branch-only.
+                "refs": git_ok, "log": git_ok, "blame": git_ok,
+            },
         }
     if method == "search/repos":
         query = params.get("query", "").lower()
@@ -234,11 +510,26 @@ def handle(root: str, method: str, params: dict) -> dict:
         return {"repos": list_repos(root)}
     if method == "repo/tree":
         repo = params["repo"]
+        ref = params.get("ref")
         return {
-            "entries": walk_tree(root, repo),
+            "entries": walk_tree(root, repo, ref=ref),
             "truncated": False,
-            "branch": "main",
+            # v1.5: branch names what was actually served — the ref
+            # when one was given (unknown ref -> NotFound above).
+            "branch": ref if ref is not None else "main",
         }
+    if method == "repo/refs":
+        return list_refs(root, params["repo"])
+    if method == "repo/log":
+        return repo_log(root, params["repo"], path=params.get("path"),
+                        ref=params.get("ref"), limit=params.get("limit"))
+    if method == "repo/blob_at":
+        data, sha = blob_at(root, params["repo"], params.get("path", ""),
+                            ref=params.get("ref"))
+        return {"bytes_b64": base64.b64encode(data).decode(), "sha": sha}
+    if method == "repo/blame":
+        return repo_blame(root, params["repo"], params.get("path", ""),
+                          ref=params.get("ref"))
     if method == "repo/clone_url":
         # Cloning a local dir: the filesystem path IS the remote.
         return {"clone_url": repo_dir(root, params["repo"])}
@@ -296,6 +587,14 @@ def main() -> None:
             else:
                 result = handle(root, req.get("method", ""), params)
             reply = {"jsonrpc": "2.0", "id": req.get("id"), "result": result}
+        except NotFound as e:
+            # v1.1 kinds: not_found renders precisely (§Errors).
+            reply = {
+                "jsonrpc": "2.0",
+                "id": req.get("id"),
+                "error": {"code": 1, "message": str(e),
+                          "data": {"kind": "not_found"}},
+            }
         except Exception as e:  # noqa: BLE001 — surfaced to the TUI
             reply = {
                 "jsonrpc": "2.0",
