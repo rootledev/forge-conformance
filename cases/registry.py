@@ -101,7 +101,7 @@ CASES = {
                REVISIONS),
     "FC-092": ("test_revisions", "tree at unknown ref -> error (not_found preferred)",
                REVISIONS + " + §Errors"),
-    "FC-093": ("test_revisions", "sha discipline across refs: different content -> different ids, same content -> same id",
+    "FC-093": ("test_revisions", "sha discipline across refs: content differs -> ids differ (change rule, both directions); same-content sharing advisory",
                REVISIONS + " + §Content ids"),
     "FC-094": ("test_revisions", "log shape: newest-first, ISO-8601 dates, path filter narrows",
                REVISIONS),
