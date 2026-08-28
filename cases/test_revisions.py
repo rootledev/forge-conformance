@@ -26,6 +26,7 @@ capability the adapter honestly declined, FC-099):
 
 import base64
 import datetime
+import warnings
 
 import pytest
 
@@ -185,25 +186,52 @@ def test_FC092_tree_at_unknown_ref_is_not_found(adapter, forge):
 
 
 def test_FC093_sha_discipline_across_refs(adapter, forge):
+    """The content-id contract is ONE-directional (§Content ids): an
+    id MUST change when content changes — that is cache correctness,
+    and it is normative here, asserted in both directions the fixture
+    can diverge two refs (main advancing past the fork, and feature
+    rewriting at the fork).
+
+    The converse — same bytes at two refs *should* share one id — is
+    a cache-sharing optimization, NOT a correctness rule: commit-
+    keyed adapters (no git blob ids on the wire; e.g. Bitbucket
+    Cloud) cannot honor it without fetching every blob on every tree
+    walk. So the same-content check is explicitly advisory: when the
+    ids differ the suite reports commit-keyed ids informationally (a
+    warning, never a failure). Content-keyed adapters pass the strict
+    form and rootle shares one cache entry for the bytes across refs;
+    commit-keyed adapters pay one entry per ref — both legal."""
     _need(adapter, forge, "refs", "FC-093")
     c = C("FC-093")
     repo = forge.repo_id(VCS)
     main_tree = adapter.request("repo/tree", {"repo": repo})
     feat_tree = adapter.request("repo/tree", {"repo": repo, "ref": "feature"})
-    main_hist = _tree_entry(main_tree, HISTORY, "FC-093")
-    feat_hist = _tree_entry(feat_tree, HISTORY, "FC-093")
-    fc_assert(main_hist["sha"] != feat_hist["sha"], *c,
-              "the cache invariant (plans/0016 M1a): the same path at two "
-              "refs with different content must carry different content "
-              "ids — rootle caches both trees content-keyed; an id shared "
-              f"across differing bytes serves stale content")
+    # Normative — the change rule, both directions of divergence:
+    for path, how in ((HISTORY, "main advanced past the fork (two more "
+                                 "commits)"),
+                      (DIVERGES, "feature rewrote the file at the fork")):
+        at_main = _tree_entry(main_tree, path, "FC-093")
+        at_feat = _tree_entry(feat_tree, path, "FC-093")
+        fc_assert(at_main["sha"] != at_feat["sha"], *c,
+                  f"the change rule (§Content ids): {path} carries "
+                  f"different bytes on main and feature ({how}), so the "
+                  "content ids MUST differ — rootle's cache is keyed by "
+                  "id and never invalidated; one id for differing bytes "
+                  "serves stale content: "
+                  f"{at_main['sha']!r} == {at_feat['sha']!r}")
+    # Advisory — same bytes sharing one id across refs:
     main_readme = _tree_entry(main_tree, "README.md", "FC-093")
     feat_readme = _tree_entry(feat_tree, "README.md", "FC-093")
-    fc_assert(main_readme["sha"] == feat_readme["sha"], *c,
-              "ids are content-keyed, not ref-keyed: README.md is "
-              "byte-identical on both branches, so its id must be the "
-              "same in both trees (a ref-keyed id would split the cache "
-              "for no reason)")
+    if main_readme["sha"] != feat_readme["sha"]:
+        warnings.warn(
+            f"[FC-093] advisory (not a failure): the adapter appears to "
+            f"key content ids by ref/commit rather than bytes — README.md "
+            f"is byte-identical on main and feature but carries different "
+            f"ids ({main_readme['sha'][:12]}… vs {feat_readme['sha'][:12]}…). "
+            f"Legal under §Content ids (the id-change rule is one-"
+            f"directional); rootle simply caches the same bytes once per "
+            f"ref instead of sharing. Content-keyed adapters pass the "
+            f"strict form.", stacklevel=2)
 
 
 # -- log -----------------------------------------------------------------------

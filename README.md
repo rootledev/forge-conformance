@@ -120,7 +120,7 @@ its title, and the spec citation.
 | FC-090 | refs shape: branches/tags arrays, sha present, at most one default | §Handshake (capabilities, v1.5) + §Methods (Revisions, v1.5) |
 | FC-091 | tree at ref serves that ref (diverging file differs; branch echoes) | §Methods (Revisions, v1.5) |
 | FC-092 | tree at unknown ref -> error (not_found preferred) | §Methods (Revisions, v1.5) + §Errors |
-| FC-093 | sha discipline across refs: different content -> different ids, same content -> same id | §Methods (Revisions, v1.5) + §Content ids |
+| FC-093 | sha discipline across refs: content differs -> ids differ (change rule, both directions); same-content sharing advisory | §Methods (Revisions, v1.5) + §Content ids |
 | FC-094 | log shape: newest-first, ISO-8601 dates, path filter narrows | §Methods (Revisions, v1.5) |
 | FC-095 | log limit stops at ~N and sets truncated: true | §Methods (Revisions, v1.5) (bounded compute) |
 | FC-096 | blob_at serves the ref's bytes; sha matches the tree-at-ref entry | §Methods (Revisions, v1.5) |
@@ -159,6 +159,17 @@ its title, and the spec citation.
   with a reason citing the case id. When git is unavailable in the
   environment the `vcs` repo is not built and FC-090..098 skip with a
   reason saying exactly that.
+- **FC-093's change rule is one-directional** (owner call,
+  rootle-bitbucket#6): an id MUST change when content changes —
+  asserted normatively, in both directions the fixture can diverge
+  two refs (main advancing past the fork; feature rewriting at it).
+  The converse — same bytes at two refs sharing one id — is a
+  cache-sharing optimization, **advisory**: commit-keyed adapters
+  (e.g. Bitbucket Cloud, no git blob ids on the wire) can't honor it
+  without fetching every blob per tree walk, so when the suite
+  detects differing ids for byte-identical content it reports the
+  adapter as commit-keyed informationally (a warning, never a
+  failure). Content-keyed adapters pass the strict form.
 - **FC-095 requires the honor path** (unlike FC-070's dual outcome):
   the v1.5 spec couples `repo/log`'s `limit` to bounded compute — stop
   at ~N and set `truncated: true` when more provably exists (the

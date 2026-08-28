@@ -45,7 +45,7 @@ they stay the single source of truth:
 
 | Input | Encodes |
 |---|---|
-| `README.md` | stable content across branches (FC-093's same-id assert) |
+| `README.md` | stable content across branches (FC-093's advisory same-id probe — commit-keyed adapters report, not fail) |
 | `HISTORY.md` | 3 lines, one commit each — the log file (FC-094/095) |
 | `BLAME.md` | lines 1–2 seeded, line 3 appended — the two-commit blame file (FC-098) |
 | `DIVERGES.main.md` / `DIVERGES.feature.md` | the one file that differs between branches, committed as `DIVERGES.md` (FC-091/093/096) |
